@@ -285,12 +285,19 @@ static NSTimeInterval uytLastPlaybackReload = 0;
 %hook YTMainAppVideoPlayerOverlayViewController
 - (void)handleError:(NSError *)error {
     if (error && [error.domain isEqualToString:@"com.google.ios.youtube.ErrorDomain.playback"] && error.code == 14) {
+        // Both early exits used to `return` without %orig, swallowing the error:
+        // the player sat on a spinner with no message and no retry button.
+        // Fall through to YouTube's own error handling instead.
         YTPlayerViewController *playerViewController = (YTPlayerViewController *)self.parentViewController;
-        if (![playerViewController.UIDelegate isKindOfClass:%c(YTWatchController)]) return;
+        if (![playerViewController.UIDelegate isKindOfClass:%c(YTWatchController)]) {
+            %orig;
+            return;
+        }
         YTWatchController *watchController = (YTWatchController *)playerViewController.UIDelegate;
         NSTimeInterval now = [[NSProcessInfo processInfo] systemUptime];
         if (now - uytLastPlaybackReload < 10.0) {
             UYTDebugWarn(@"FixPlayback: playback error 14 repeated — suppressing reload loop");
+            %orig;
             return;
         }
         uytLastPlaybackReload = now;

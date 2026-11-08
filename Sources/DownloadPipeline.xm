@@ -66,6 +66,9 @@ static NSString *UYTIOSModel(void) {
 // video-only formats, so the audio slot could get the whole video).
 static UYTStreamFormat *UYTStreamFormatFromDict(NSDictionary *f, NSString *url, BOOL fromMuxedList) {
     UYTStreamFormat *sf = [[UYTStreamFormat alloc] init];
+    // -1 = "not computed"; the rank caches test >= 0, so the default 0 made every rank 0.
+    sf.containerRank = -1;
+    sf.codecRank = -1;
     sf.url = url;
     sf.itag = [f[@"itag"] integerValue];
     sf.mimeType = f[@"mimeType"];
@@ -936,8 +939,18 @@ static void *UYTDownloadItemAudioLegKey = &UYTDownloadItemAudioLegKey;
                        ? (NSString *)downloadID : [downloadID description] ?: @"";
         NSString *path = [filePath respondsToSelector:@selector(hasSuffix:)]
                        ? (NSString *)filePath : [filePath description] ?: @"";
-        if ([base rangeOfString:@"Video"].location != NSNotFound ||
-            [path rangeOfString:@"Video"].location != NSNotFound) {
+        // Decide by the "_Audio"/"_Video" suffix first. The old plain substring
+        // test checked "Video" first anywhere in the path, so the audio leg of
+        // e.g. "… (Official Music Video)_Audio.webm" was routed as the VIDEO
+        // leg and downloaded the whole video into the audio slot.
+        NSString *stem = [[path lastPathComponent] stringByDeletingPathExtension] ?: @"";
+        NSString *idStem = [[base lastPathComponent] stringByDeletingPathExtension] ?: @"";
+        if ([stem hasSuffix:@"_Audio"] || [idStem hasSuffix:@"_Audio"]) {
+            audioLeg = YES;
+        } else if ([stem hasSuffix:@"_Video"] || [idStem hasSuffix:@"_Video"]) {
+            audioLeg = NO;
+        } else if ([base rangeOfString:@"Video"].location != NSNotFound ||
+                   [path rangeOfString:@"Video"].location != NSNotFound) {
             audioLeg = NO;
         } else if ([base rangeOfString:@"Audio"].location != NSNotFound ||
                    [path rangeOfString:@"Audio"].location != NSNotFound) {
@@ -993,6 +1006,18 @@ static void *UYTDownloadItemAudioLegKey = &UYTDownloadItemAudioLegKey;
             %orig(fixed);
             return;
         }
+    }
+
+    if ((isAudioLeg || audioOnly) && !UYTResolvedEntrySnapshot(vid)[@"audio"]) {
+        // Race: getLinksLocally kicks off the innertube refresh asynchronously
+        // and immediately calls %orig, so setRemoteURL: can run before the
+        // refresh has stored anything. Refusing here left the audio leg with
+        // no URL at all (silent stall). With no resolved data yet, uYou's own
+        // URL is the only option, so let it through.
+        UYTDebugWarn(@"[UYTPipeline] %@ %@: resolved URLs not ready yet - keeping uYou's URL",
+                     isAudioLeg ? @"audio leg" : @"audio-only request", vid);
+        %orig;
+        return;
     }
 
     if (isAudioLeg || audioOnly) {

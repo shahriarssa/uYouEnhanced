@@ -29,15 +29,19 @@ static NSString *uYouAccessGroupIDInternal() {
                            @"", kSecAttrService,
                            (id)kCFBooleanTrue, kSecReturnAttributes,
                            nil];
-    CFDictionaryRef result = nil;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
     if (status == errSecItemNotFound) {
-        status = SecItemAdd((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
-        if (status != errSecSuccess) {
-            return nil;
-        }
+        if (result) { CFRelease(result); result = NULL; }
+        status = SecItemAdd((__bridge CFDictionaryRef)query, &result);
     }
-    NSString *accessGroup = [(__bridge NSDictionary *)result objectForKey:(__bridge NSString *)kSecAttrAccessGroup];
+    if (status != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return nil;
+    }
+    // __bridge_transfer: the old __bridge cast leaked the dictionary every call.
+    NSDictionary *attrs = (__bridge_transfer NSDictionary *)result;
+    NSString *accessGroup = [attrs isKindOfClass:[NSDictionary class]] ? attrs[(__bridge NSString *)kSecAttrAccessGroup] : nil;
     if (accessGroup) {
         NSArray *components = [accessGroup componentsSeparatedByString:@"."];
         if (components.count >= 2) {
@@ -722,38 +726,64 @@ static void UYTArmStallWatchdog(id item, NSTimeInterval seconds) {
 %end
 
 // --- File Access / Entitlement Error Recovery (#520, #241, #735) ---
+// This hook is process-wide. The old version redirected ANY failed move in the
+// whole app (YouTube's caches, databases, ...) into Documents/uYouDownloads and
+// then reported success, and on a repeat failure it re-entered itself with the
+// same fallback path forever (stack overflow). It is now limited to media files
+// headed for the app's Documents/tmp area, never recurses, and leaves
+// "destination already exists" to the caller.
+static BOOL UYTIsDownloadMediaPath(NSString *path) {
+    if (!path.length) return NO;
+    static NSSet<NSString *> *exts;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        exts = [NSSet setWithArray:@[@"mp4", @"m4a", @"m4v", @"mov", @"mp3", @"webm", @"aac", @"opus"]];
+    });
+    if (![exts containsObject:path.pathExtension.lowercaseString]) return NO;
+    NSString *docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject];
+    NSString *std = [path stringByStandardizingPath];
+    return (docs.length && [std hasPrefix:[docs stringByStandardizingPath]]) ||
+           [std hasPrefix:[NSTemporaryDirectory() stringByStandardizingPath]];
+}
+
+static NSString *const kUYTMoveFallbackActiveKey = @"UYTMoveFallbackActive";
+
 %hook NSFileManager
 - (BOOL)moveItemAtPath:(NSString *)srcPath toPath:(NSString *)dstPath error:(NSError **)error {
     BOOL result = %orig;
+    if (result || !error || !*error) return result;
 
-    if (!result && error && *error) {
-        if ([*error code] == NSFileWriteNoPermissionError ||
-            [*error code] == NSFileWriteFileExistsError ||
-            [*error domain] == NSPOSIXErrorDomain) {
+    NSMutableDictionary *tls = [[NSThread currentThread] threadDictionary];
+    if ([tls[kUYTMoveFallbackActiveKey] boolValue]) return result;
+    if (!UYTIsDownloadMediaPath(dstPath) && !UYTIsDownloadMediaPath(srcPath)) return result;
 
-            NSString *docsDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject];
-            NSString *fallbackName = [dstPath lastPathComponent];
-            NSString *fallbackPath = [docsDir stringByAppendingPathComponent:@"uYouDownloads"];
-            fallbackPath = [fallbackPath stringByAppendingPathComponent:fallbackName];
+    NSError *underlying = (*error).userInfo[NSUnderlyingErrorKey];
+    BOOL permissionLike = (*error).code == NSFileWriteNoPermissionError ||
+        [(*error).domain isEqualToString:NSPOSIXErrorDomain] ||
+        [underlying.domain isEqualToString:NSPOSIXErrorDomain];
+    if (!permissionLike || (*error).code == NSFileWriteFileExistsError) return result;
 
-            [[NSFileManager defaultManager] createDirectoryAtPath:[fallbackPath stringByDeletingLastPathComponent]
-                                   withIntermediateDirectories:YES
-                                                    attributes:nil
-                                                         error:nil];
+    NSString *docsDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) lastObject];
+    NSString *fallbackDir = [docsDir stringByAppendingPathComponent:@"uYouDownloads"];
+    NSString *fallbackPath = [fallbackDir stringByAppendingPathComponent:[dstPath lastPathComponent]];
+    if ([[fallbackPath stringByStandardizingPath] isEqualToString:[dstPath stringByStandardizingPath]]) return result;
 
-            NSError *fallbackError = nil;
-            result = [self moveItemAtPath:srcPath toPath:fallbackPath error:&fallbackError];
-            if (result) {
-                UYTPatchInfo(@"[uYouPatches] File moved to Documents fallback: %@", fallbackPath);
-            } else {
-                result = [self copyItemAtPath:srcPath toPath:fallbackPath error:&fallbackError];
-                if (result) {
-                    UYTPatchInfo(@"[uYouPatches] File copied to Documents fallback: %@", fallbackPath);
-                }
-            }
+    tls[kUYTMoveFallbackActiveKey] = @YES;
+    @try {
+        [self createDirectoryAtPath:fallbackDir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSError *fallbackError = nil;
+        if ([self moveItemAtPath:srcPath toPath:fallbackPath error:&fallbackError]) {
+            UYTPatchWarn(@"[uYouPatches] move %@ -> %@ failed (%@); moved to Documents fallback %@",
+                         srcPath, dstPath, (*error).localizedDescription, fallbackPath);
+            result = YES;
+        } else if ([self copyItemAtPath:srcPath toPath:fallbackPath error:&fallbackError]) {
+            UYTPatchWarn(@"[uYouPatches] move %@ -> %@ failed; copied to Documents fallback %@",
+                         srcPath, dstPath, fallbackPath);
+            result = YES;
         }
+    } @finally {
+        [tls removeObjectForKey:kUYTMoveFallbackActiveKey];
     }
-
     return result;
 }
 
@@ -794,14 +824,17 @@ static float uYouSavedPlaybackRate = 0.0f;
 // --- Prevent Speed Reset During Video Transitions (#681) ---
 %hook YTMainAppVideoPlayerOverlayViewController
 - (void)setPlaybackRate:(CGFloat)rate {
-    %orig(rate);
-
-    // Save the rate if user explicitly set it (not a system reset to 1.0)
-    if (rate != 1.0f) {
-        uYouSavedPlaybackRate = rate;
-        [[NSUserDefaults standardUserDefaults] setFloat:rate forKey:@"uYouSavedPlaybackRate"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
+    // This is the overlay's speed-menu path, i.e. a user choice. The old code
+    // ignored 1.0 here, so after picking any other speed the user could never
+    // get back to normal speed (the getter below kept re-applying the saved
+    // rate, across launches too). Record every positive choice, 1.0 included.
+    // Saved BEFORE %orig: %orig reaches HAMPlayerInternal -setRate:, which
+    // would otherwise still see the old saved rate and override 1.0 with it.
+    if (rate > 0.0f) {
+        uYouSavedPlaybackRate = (float)rate;
+        [[NSUserDefaults standardUserDefaults] setFloat:(float)rate forKey:@"uYouSavedPlaybackRate"];
     }
+    %orig(rate);
 }
 
 - (CGFloat)currentPlaybackRate {
@@ -826,10 +859,9 @@ static float uYouSavedPlaybackRate = 0.0f;
 %hook YTPlayerViewController
 - (void)setPlaybackRate:(float)rate {
     %orig(rate);
-    if (rate != 1.0f) {
+    if (rate != 1.0f && rate > 0.0f) {
         uYouSavedPlaybackRate = rate;
         [[NSUserDefaults standardUserDefaults] setFloat:rate forKey:@"uYouSavedPlaybackRate"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
     }
 }
 
@@ -837,7 +869,7 @@ static float uYouSavedPlaybackRate = 0.0f;
     %orig(animated);
 
     // Restore saved playback rate when player appears (on next runloop)
-    float savedRate = [[NSUserDefaults standardUserDefaults] floatForKey:@"uYouSavedPlaybackRate"];
+    float savedRate = uYouSavedPlaybackRate;
     if (savedRate > 0.0f && savedRate != 1.0f) {
         dispatch_async(dispatch_get_main_queue(), ^{
             @try {
@@ -978,6 +1010,20 @@ static float uYouSavedPlaybackRate = 0.0f;
     // kReplaceYTDownloadWithuYou toggle (that toggle only reroutes the button).
     UYTPatchInfo(@"[uYouPatches] arming gYouDownloadFixes (toggle=%d)", (int)IS_ENABLED(kReplaceYTDownloadWithuYou));
     %init(gYouDownloadFixes);
+
+    // The idle timer was disabled when a download started but only re-enabled
+    // when the app went to the background, so the screen never auto-locked
+    // again after a download finished in the foreground.
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"downloadDidCompleteNotification"
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification *note) {
+        if (uYouActiveDownloadCount > 0) uYouActiveDownloadCount--;
+        if (uYouActiveDownloadCount == 0 && uYouDownloadIsActive) {
+            uYouDownloadIsActive = NO;
+            [[UIApplication sharedApplication] setIdleTimerDisabled:NO];
+        }
+    }];
 
     // Speed fixes: only register when EVERY hooked selector exists on this
     // YouTube build, or respondsToSelector: lies and the next caller SIGABRTs.
