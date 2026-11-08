@@ -173,13 +173,13 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: main/modules/ffmpeg
-          key: ffmpegkit-${{ runner.os }}-${{ hashFiles('main/tools/fetch-ffmpegkit.sh') }}
+          key: ffmpegkit-${{ runner.os }}-${{ hashFiles('main/Tools/fetch-ffmpegkit.sh') }}
 
       - name: Build FFmpegKit from source
         if: ${{ inputs.build_ffmpeg && steps.ffmpeg_cache.outputs.cache-hit != 'true' }}
         run: |
           cd main
-          bash tools/fetch-ffmpegkit.sh
+          bash Tools/fetch-ffmpegkit.sh
 
       - name: Save FFmpegKit cache
         if: ${{ inputs.build_ffmpeg && steps.ffmpeg_cache.outputs.cache-hit != 'true' && hashFiles('main/modules/ffmpeg/**') != '' }}

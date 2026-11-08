@@ -97,7 +97,8 @@ include $(THEOS_MAKE_PATH)/tweak.mk
 
 .PHONY: internal-clean before-all before-package
 internal-clean::
-	@rm -rf $(UYOU_PATH)/*
+	@# Keep the bundled uYou .deb: deleting it forced a re-download from Dropbox on the next build.
+	@find $(UYOU_PATH) -mindepth 1 -maxdepth 1 ! -name 'com.miro.uyou_*.deb' -exec rm -rf {} +
 
 ifneq ($(JAILBROKEN),1)
 before-all::
@@ -119,12 +120,12 @@ before-all::
 	$(PRINT_FORMAT_BLUE) "uYou rebranded to 3.0.5 (Unofficial Build)";
 
 before-package::
-	@bash tools/stage-ffmpeg.sh "$(THEOS_PROJECT_DIR)/Bundles"
+	@bash Tools/stage-ffmpeg.sh "$(THEOS_PROJECT_DIR)/Bundles"
 
 else
 before-package::
 	@mkdir -p $(THEOS_STAGING_DIR)/Library/Application\ Support; cp -r Localizations/uYouPlus.bundle $(THEOS_STAGING_DIR)/Library/Application\ Support/
 endif
 after-stage::
-	@bash tools/stage-ffmpeg.sh "$(THEOS_STAGING_DIR)"
+	@bash Tools/stage-ffmpeg.sh "$(THEOS_STAGING_DIR)"
 
