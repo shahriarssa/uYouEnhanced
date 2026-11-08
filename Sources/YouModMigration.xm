@@ -2,6 +2,7 @@
 #import "uYouPlus.h"
 #import "UYTLog.h"
 #import <UIKit/UIKit.h>
+#import <YouTubeHeader/YTUIUtils.h>
 
 #define YouModPrefix @"YouMod"
 
@@ -120,7 +121,6 @@ static void UYMCopyInverted(NSUserDefaults *defaults, NSString *oldKey, NSString
         kDisableAmbientMode: RemoveAmbiant,
         kHideOverlayDarkBackground: RemoveDarkOverlay,
         kYTMiniPlayer: ForceMiniPlayer,
-        kBigYTMiniPlayer: ForceMiniPlayer,
         kDisableHints: DisableHints,
         kHideShareButton: RemoveVideoShareButton,
         kHideDownloadButton: RemoveVideoDownloadButton,
@@ -141,7 +141,6 @@ static void UYMCopyInverted(NSUserDefaults *defaults, NSString *oldKey, NSString
         kHidePreviewCommentSection: HideCommentsPreview,
         kHideReportButton: RemoveReportOption,
         kHideYTMusicButton: RemoveYouTubeMusicOption,
-        kYTStartupAnimation: HideStartupAni,
         kReplaceYTDownloadWithuYou: DownloadManager,
         kShortsProgressBar: ShowShortsSeekbar,
         kHideFullscreenActions: HideFullAction,
@@ -155,6 +154,8 @@ static void UYMCopyInverted(NSUserDefaults *defaults, NSString *oldKey, NSString
         kSnapToChapter: DontSnapToChapter,
         kPinchToZoom: DisablesFreeZoom,
         kDoubleTapToSeek: DisablesDoubleTap,
+        // kYTStartupAnimation ENABLES the animation; YouMod's key HIDES it.
+        kYTStartupAnimation: HideStartupAni,
     };
 
     for (NSString *oldKey in invertedMapping) {
@@ -175,7 +176,7 @@ static void UYMCopyInverted(NSUserDefaults *defaults, NSString *oldKey, NSString
         migrated++;
     }
 
-    if ([defaults objectForKey:kiPhoneLayout] != nil) {
+    if ([defaults boolForKey:kiPhoneLayout]) {
         [defaults setInteger:2 forKey:DeviceUIIndex];
         migrated++;
     }
@@ -216,7 +217,9 @@ static void UYMCopyInverted(NSUserDefaults *defaults, NSString *oldKey, NSString
                                                                            message:msg
                                                                     preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [[UIApplication sharedApplication].keyWindow.rootViewController presentViewController:alert animated:YES completion:nil];
+            // rootViewController is already presenting Settings, so UIKit dropped the alert.
+            UIViewController *presenter = [%c(YTUIUtils) topViewControllerForPresenting] ?: [UIApplication sharedApplication].keyWindow.rootViewController;
+            [presenter presentViewController:alert animated:YES completion:nil];
         }
     });
 }

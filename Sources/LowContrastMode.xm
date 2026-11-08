@@ -389,14 +389,17 @@ static inline BOOL isDarkMode() {
     if (lowContrastMode() || customContrastMode()) {
         %init(gContrastModeShared);
         if (customContrastMode()) {
-            NSData *colorData = [[NSUserDefaults standardUserDefaults] objectForKey:@"kCustomUIColor"];
-            if (colorData) {
-                NSError *error = nil;
-                NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:colorData error:&error];
-                if (!error) {
-                    [unarchiver setRequiresSecureCoding:NO];
-                    lcmHexColor = [unarchiver decodeObjectForKey:NSKeyedArchiveRootObjectKey];
-                }
+            id colorData = [[NSUserDefaults standardUserDefaults] objectForKey:@"kCustomUIColor"];
+            if ([colorData isKindOfClass:[NSData class]]) {
+                @try {
+                    NSError *error = nil;
+                    NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:colorData error:&error];
+                    if (!error) {
+                        [unarchiver setRequiresSecureCoding:NO];
+                        id decoded = [unarchiver decodeObjectForKey:NSKeyedArchiveRootObjectKey];
+                        if ([decoded isKindOfClass:[UIColor class]]) lcmHexColor = decoded;
+                    }
+                } @catch (NSException *e) {}
             }
         }
     }

@@ -72,6 +72,16 @@ static NSInteger _notificationsBadgeCount = 0;
 	    }
 	} @catch (NSException *e1) {}
 
+	// setRenderer: can be called again with the same renderer (rotation,
+	// account switch, pivot refresh); the tab used to be inserted every time,
+	// giving duplicate Notifications tabs.
+	for (YTIPivotBarSupportedRenderers *existing in renderer.itemsArray) {
+	    if ([existing.pivotBarItemRenderer.pivotIdentifier isEqualToString:@"FEnotifications_inbox"]) {
+	        %orig(renderer);
+	        return;
+	    }
+	}
+
 	YTIBrowseEndpoint *endPoint = [[%c(YTIBrowseEndpoint) alloc] init];
 	[endPoint setBrowseId:@"FEnotifications_inbox"];
 	YTICommand *command = [[%c(YTICommand) alloc] init];

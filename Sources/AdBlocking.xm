@@ -237,11 +237,12 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
 %end
 
 %ctor {
-    if (IS_ENABLED(kAdBlockWorkaroundLite)) {
-        %init(uYouAdBlockingWorkaroundLite);
-    }
+    // The two groups hook the same selectors; with both toggles on they were
+    // both installed and stacked. The full workaround is a superset, so it wins.
     if (IS_ENABLED(kAdBlockWorkaround)) {
         %init(uYouAdBlockingWorkaround);
+    } else if (IS_ENABLED(kAdBlockWorkaroundLite)) {
+        %init(uYouAdBlockingWorkaroundLite);
     }
 }
 

@@ -74,11 +74,43 @@ static int getNotificationIconStyle() {
 }
 static const NSInteger uYouPlusSection = 500;
 
-@interface YTSettingsSectionItemManager (uYouPlus)
+@interface YTSettingsSectionItemManager (uYouPlus) <UIDocumentPickerDelegate>
 - (void)updateTweakSectionWithEntry:(id)entry;
 @end
 
 extern NSBundle *uYouPlusBundle();
+
+// Exported values are written with "%@", so they come back as strings. Turn
+// plain numbers back into NSNumber so typed readers (objectForKey + isKindOf
+// NSNumber, KVO observers, other tweaks) see what they originally stored.
+static id UYTParseImportedSettingValue(NSString *value) {
+    NSString *v = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (!v.length) return v;
+    NSScanner *intScanner = [NSScanner scannerWithString:v];
+    long long i = 0;
+    if ([intScanner scanLongLong:&i] && intScanner.isAtEnd) return @(i);
+    NSScanner *dblScanner = [NSScanner scannerWithString:v];
+    double d = 0;
+    if ([dblScanner scanDouble:&d] && dblScanner.isAtEnd) return @(d);
+    return v;
+}
+
+static NSUInteger UYTApplyImportedSettings(NSString *settingsString) {
+    NSUInteger applied = 0;
+    NSSet *allowed = [NSSet setWithArray:NSUserDefaultsCopyKeys];
+    for (NSString *rawLine in [settingsString componentsSeparatedByCharactersInSet:[NSCharacterSet newlineCharacterSet]]) {
+        NSRange sep = [rawLine rangeOfString:@": "];
+        if (sep.location == NSNotFound) continue;
+        NSString *key = [[rawLine substringToIndex:sep.location] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSString *value = [rawLine substringFromIndex:sep.location + sep.length];
+        // Only keys we export; a stray line can no longer write arbitrary
+        // defaults (e.g. a color key that is later unarchived as NSData).
+        if (!key.length || ![allowed containsObject:key]) continue;
+        [[NSUserDefaults standardUserDefaults] setObject:UYTParseImportedSettingValue(value) forKey:key];
+        applied++;
+    }
+    return applied;
+}
 
 %hook YTSettingsViewController
 - (void)loadWithModel:(id)model fromView:(UIView *)view {
@@ -197,12 +229,9 @@ extern NSBundle *uYouPlusBundle();
                 [[UIPasteboard generalPasteboard] setString:settingsString];
                 [[%c(GOOHUDManagerInternal) sharedInstance] showMessageMainThread:[%c(YTHUDMessage) messageWithText:@"Settings copied"]];
             }
-            UIAlertController *exportAlert = [UIAlertController alertControllerWithTitle:@"Export Settings" message:@"Note: This feature cannot save iSponsorBlock and most YouTube settings.\n\nWould you like to also export your uYouEnhanced Settings?" preferredStyle:UIAlertControllerStyleAlert];
-            [exportAlert addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
-            [exportAlert addAction:[UIAlertAction actionWithTitle:@"Export" style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
-                [%c(YTLUserDefaults) exportYtlSettings];
-            }]];
-            [settingsViewController presentViewController:exportAlert animated:YES completion:nil];
+            // Removed: a YTLite leftover alert that called YTLUserDefaults (not
+            // in this build, so "Export" did nothing) and was presented on top
+            // of the document picker, which UIKit refuses.
             return YES;
         }
     ];
@@ -226,15 +255,7 @@ extern NSBundle *uYouPlusBundle();
                 [confirmPasteAlert addAction:[UIAlertAction actionWithTitle:LOC(@"MSG_CONFIRM") style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
                     NSString *settingsString = [[UIPasteboard generalPasteboard] string];
                     if (settingsString.length > 0) {
-                        NSArray *lines = [settingsString componentsSeparatedByString:@"\n"];
-                        for (NSString *line in lines) {
-                            NSArray *components = [line componentsSeparatedByString:@": "];
-                            if (components.count == 2) {
-                                NSString *key = components[0];
-                                NSString *value = components[1];
-                                [[NSUserDefaults standardUserDefaults] setObject:value forKey:key];
-                            }
-                        }
+                        UYTApplyImportedSettings(settingsString);
                         [settingsViewController reloadData];
                         [[%c(GOOHUDManagerInternal) sharedInstance] showMessageMainThread:[%c(YTHUDMessage) messageWithText:@"Settings applied"]];
                         SHOW_RELAUNCH_YT_SNACKBAR;
@@ -242,11 +263,9 @@ extern NSBundle *uYouPlusBundle();
                 }]];
                 [settingsViewController presentViewController:confirmPasteAlert animated:YES completion:nil];
             }
-            UIAlertController *reminderAlert = [UIAlertController alertControllerWithTitle:@"Reminder"
-                                                                                message:@"Remember to import your uYouEnhanced settings as well."
-                                                                            preferredStyle:UIAlertControllerStyleAlert];
-            [reminderAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [settingsViewController presentViewController:reminderAlert animated:YES completion:nil];
+            // Removed: a second "Reminder" alert presented in the same runloop
+            // as the confirm alert / picker. UIKit drops it ("already
+            // presenting"), and it referred to YTLite's separate settings.
             return YES;
         }
     ];
@@ -1005,30 +1024,34 @@ NSString *cacheDescription = [NSString stringWithFormat:@"%@", GetCacheSize()];
         [settingsViewController setSectionItems:sectionItems forCategory:uYouPlusSection title:LOC(@"APP_NAME") titleDescription:LOC(@"UYOUENHANCED_SECTION_DESC") headerHidden:YES];
 }
 
+// %new on both delegate methods: YTSettingsSectionItemManager does not
+// implement them, so without %new the hooks were never installed and the
+// picker's selection was silently dropped (Import Settings did nothing).
+%new
 - (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
     if (urls.count > 0) {
         NSURL *url = urls.firstObject;
+        BOOL scoped = [url startAccessingSecurityScopedResource];
         NSError *error = nil;
         NSString *settingsString = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:&error];
-        if (error) {
+        if (scoped) [url stopAccessingSecurityScopedResource];
+        if (error || !settingsString) {
             UYTDebugErr(@"uYouPlusSettings error reading file: %@", error.localizedDescription);
             UIAlertController *errorAlert = [UIAlertController alertControllerWithTitle:@"Error" message:@"Failed to read the settings file." preferredStyle:UIAlertControllerStyleAlert];
             [errorAlert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+            UIViewController *presenter = nil;
+            @try { presenter = [self valueForKey:@"_settingsViewControllerDelegate"]; } @catch (NSException *e) {}
+            if (![presenter isKindOfClass:[UIViewController class]]) presenter = [%c(YTUIUtils) topViewControllerForPresenting];
+            [presenter presentViewController:errorAlert animated:YES completion:nil];
             return;
         }
-        NSArray *lines = [settingsString componentsSeparatedByString:@"\n"];
-        for (NSString *line in lines) {
-            NSArray *components = [line componentsSeparatedByString:@": "];
-            if (components.count == 2) {
-                NSString *key = components[0];
-                NSString *value = components[1];
-                [[NSUserDefaults standardUserDefaults] setObject:value forKey:key];
-            }
-        }
-        [[%c(GOOHUDManagerInternal) sharedInstance] showMessageMainThread:[%c(YTHUDMessage) messageWithText:@"Settings imported"]];
+        NSUInteger applied = UYTApplyImportedSettings(settingsString);
+        NSString *msg = [NSString stringWithFormat:@"Settings imported (%lu)", (unsigned long)applied];
+        [[%c(GOOHUDManagerInternal) sharedInstance] showMessageMainThread:[%c(YTHUDMessage) messageWithText:msg]];
     }
 }
 
+%new
 - (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
     UYTDebugInfo(@"uYouPlusSettings document picker was cancelled");
 }

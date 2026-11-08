@@ -140,7 +140,9 @@ static BOOL UYTIconSpecOK(NSString *name, NSString **reasonOut) {
 
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:[NSString stringWithFormat:@"/var/mobile/Library/Preferences/%@.plist", kPrefDomain]] ?: @{};
     NSString *saved = prefs[kPrefIconName];
-    self.selectedIconIndex = saved ? [self.appIcons indexOfObject:saved] : -1;
+    // Default is saved as @"" and indexOfObject: returns NSNotFound, not -1.
+    NSUInteger savedIndex = saved.length ? [self.appIcons indexOfObject:saved] : NSNotFound;
+    self.selectedIconIndex = (savedIndex == NSNotFound) ? -1 : (NSInteger)savedIndex;
 
     UICollectionViewFlowLayout *layout = [[UICollectionViewFlowLayout alloc] init];
     layout.minimumInteritemSpacing = 16;

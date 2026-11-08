@@ -49,7 +49,7 @@ static UIVisualEffect *UYTLiquidGlassEffect(void) {
         self.navigationController.navigationBar.prefersLargeTitles = YES;
     }
 
-    [self.navigationController.navigationBar setTitleTextAttributes:@{NSFontAttributeName: [UIFont fontWithName:@"YTSans-Bold" size:22], NSForegroundColorAttributeName: [UIColor labelColor]}];
+    [self.navigationController.navigationBar setTitleTextAttributes:@{NSFontAttributeName: [UIFont fontWithName:@"YTSans-Bold" size:22] ?: [UIFont systemFontOfSize:22 weight:UIFontWeightBold], NSForegroundColorAttributeName: [UIColor labelColor]}];
 
     [self setupBackButton];
     [self setupTableView];
@@ -186,6 +186,7 @@ static UIVisualEffect *UYTLiquidGlassEffect(void) {
     cell.textLabel.font = [UIFont systemFontOfSize:18 weight:UIFontWeightRegular];
     cell.detailTextLabel.adjustsFontSizeToFitWidth = YES;
     cell.detailTextLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
+    cell.accessoryView = nil; // drop the Clear Cache spinner on reuse
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
 
     BOOL isPortrait = UIDevice.currentDevice.orientation == UIDeviceOrientationPortrait;
