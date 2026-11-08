@@ -144,6 +144,7 @@ static NSArray<NSString *> *UYTLocateNFunction(NSString *js) {
         JSValue *fn = self.sigContext[self.sigFunctionName];
         if (!fn || fn.isUndefined) return nil;
         JSValue *result = [fn callWithArguments:@[s]];
+        if (!result.isString) return nil; // a thrown JS error yields undefined -> "undefined"
         NSString *out = result.toString;
         return out.length ? out : nil;
     } @catch (NSException *e) {
@@ -158,6 +159,7 @@ static NSArray<NSString *> *UYTLocateNFunction(NSString *js) {
         JSValue *fn = self.nContext[@"__n"];
         if (!fn || fn.isUndefined) return nil;
         JSValue *result = [fn callWithArguments:@[n]];
+        if (!result.isString) return nil; // keep the original n rather than n=undefined
         NSString *out = result.toString;
         return out.length ? out : nil;
     } @catch (NSException *e) {
@@ -200,6 +202,11 @@ static NSArray<NSString *> *UYTLocateNFunction(NSString *js) {
             return;
         }
         NSString *html = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (!html.length) {
+            // Non-UTF-8 / empty body: the regex below throws on a nil string.
+            completion(nil, [NSError errorWithDomain:@"UYTSigDecipher" code:3 userInfo:@{NSLocalizedDescriptionKey: @"watch page not decodable"}]);
+            return;
+        }
         NSRegularExpression *jsUrlRe = [NSRegularExpression regularExpressionWithPattern:@"\"jsUrl\"\\s*:\\s*\"([^\"]+)\"" options:0 error:nil];
         NSTextCheckingResult *m = [jsUrlRe firstMatchInString:html options:0 range:NSMakeRange(0, html.length)];
         if (!m) {
@@ -213,8 +220,12 @@ static NSArray<NSString *> *UYTLocateNFunction(NSString *js) {
         NSString *cachePath = version ? [[self cacheDirectory] stringByAppendingPathComponent:[version stringByAppendingPathExtension:@"json"]] : nil;
 
         if (cachePath && [[NSFileManager defaultManager] fileExistsAtPath:cachePath]) {
-            NSDictionary *cached = [NSJSONSerialization JSONObjectWithData:[NSData dataWithContentsOfFile:cachePath] options:0 error:nil];
-            UYTPlayerJSContext *player = [self playerFromCachedDictionary:cached];
+            // dataWithContentsOfFile can return nil (partial write, protection
+            // class) and JSONObjectWithData:nil throws on this background queue.
+            NSData *cacheData = [NSData dataWithContentsOfFile:cachePath];
+            id cached = cacheData.length ? [NSJSONSerialization JSONObjectWithData:cacheData options:0 error:nil] : nil;
+            UYTPlayerJSContext *player = [cached isKindOfClass:[NSDictionary class]] ? [self playerFromCachedDictionary:cached] : nil;
+            if (!player) [[NSFileManager defaultManager] removeItemAtPath:cachePath error:nil];
             if (player) {
                 HBLogInfo(@"[YTSigDecipher] using cached player.js functions (version %@)", version);
                 completion(player, nil);
@@ -232,6 +243,10 @@ static NSArray<NSString *> *UYTLocateNFunction(NSString *js) {
                 return;
             }
             NSString *js = [[NSString alloc] initWithData:jsData encoding:NSUTF8StringEncoding];
+            if (!js.length) {
+                completion(nil, [NSError errorWithDomain:@"UYTSigDecipher" code:3 userInfo:@{NSLocalizedDescriptionKey: @"player.js not decodable"}]);
+                return;
+            }
             NSArray<NSString *> *sig = UYTLocateSigFunction(js);
             if (!sig) {
                 HBLogWarn(@"[YTSigDecipher] could not locate signature function in player.js (version %@)", version);

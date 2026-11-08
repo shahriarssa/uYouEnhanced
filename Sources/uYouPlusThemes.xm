@@ -797,12 +797,22 @@ static void UYTApplyCellBackgroundColor(id cell, UIColor *color) {
         %init(gOldDarkTheme)
     }
     if (IS_CUSTOM_DARK_THEME_SELECTED && pageStyleAvailable) {
-        NSData *colorData = [[NSUserDefaults standardUserDefaults] objectForKey:@"kCustomThemeColor"];
-        NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:colorData error:nil];
-        [unarchiver setRequiresSecureCoding:NO];
-        NSString *hexString = [unarchiver decodeObjectForKey:NSKeyedArchiveRootObjectKey];
-        if (hexString != nil) {
-            customHexColor = [unarchiver decodeObjectForKey:NSKeyedArchiveRootObjectKey];
+        // Custom theme picked but no color saved yet (or after "Reset"): colorData
+        // is nil, and -initForReadingFromData:nil throws inside %ctor, which
+        // crashed YouTube on every launch.
+        id colorData = [[NSUserDefaults standardUserDefaults] objectForKey:@"kCustomThemeColor"];
+        id decoded = nil;
+        if ([colorData isKindOfClass:[NSData class]] && [(NSData *)colorData length]) {
+            @try {
+                NSKeyedUnarchiver *unarchiver = [[NSKeyedUnarchiver alloc] initForReadingFromData:colorData error:nil];
+                [unarchiver setRequiresSecureCoding:NO];
+                decoded = [unarchiver decodeObjectForKey:NSKeyedArchiveRootObjectKey];
+            } @catch (NSException *e) {
+                decoded = nil;
+            }
+        }
+        if ([decoded isKindOfClass:[UIColor class]]) {
+            customHexColor = decoded;
             %init(gCustomTheme);
             if (cellLayoutAPIPresent) {
                 %init(gCustomCellTint);

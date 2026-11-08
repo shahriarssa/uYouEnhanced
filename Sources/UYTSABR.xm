@@ -75,7 +75,7 @@ static NSUInteger SABRParseUMP(NSData *data, void (^handler)(uint64_t type, cons
         uint64_t type = 0, size = 0;
         NSUInteger c1 = SABRReadUMPVarint(b, len, pos, &type); if (!c1) break; pos += c1;
         NSUInteger c2 = SABRReadUMPVarint(b, len, pos, &size); if (!c2) break; pos += c2;
-        if (pos + size > len) break;
+        if (size > (uint64_t)(len - pos)) break; // overflow-safe bounds check
         if (handler) handler(type, b + pos, (NSUInteger)size);
         pos += (NSUInteger)size;
     }
@@ -171,7 +171,7 @@ static BOOL SABRIterateTopLevel(NSData *data, BOOL (^handler)(uint64_t field, in
         NSUInteger payloadStart = pos, payloadLen = 0;
         if (wire == kProtoWireVarint) { uint64_t v; NSUInteger c = SABRReadProtoVarint(b, len, pos, &v); if (!c) return NO; payloadLen = c; pos += c; }
         else if (wire == kProtoWire64Bit) { if (pos + 8 > len) return NO; payloadLen = 8; pos += 8; }
-        else if (wire == kProtoWireLengthDelimited) { uint64_t l; NSUInteger c = SABRReadProtoVarint(b, len, pos, &l); if (!c || pos + c + l > len) return NO; payloadStart = pos + c; payloadLen = (NSUInteger)l; pos += c + l; }
+        else if (wire == kProtoWireLengthDelimited) { uint64_t l; NSUInteger c = SABRReadProtoVarint(b, len, pos, &l); if (!c || l > (uint64_t)(len - pos - c)) return NO; /* overflow-safe: pos+c+l could wrap */ payloadStart = pos + c; payloadLen = (NSUInteger)l; pos += c + l; }
         else if (wire == kProtoWire32Bit) { if (pos + 4 > len) return NO; payloadLen = 4; pos += 4; }
         else return NO;
         if (handler && !handler(field, wire, fieldStart, pos, payloadStart, payloadLen)) return YES;
@@ -699,6 +699,11 @@ void UYTSABRFallbackDownloadForVideoID(NSString *videoID,
                                       BOOL audioOnly,
                                       void (^_Nullable progress)(double fractionComplete, unsigned long long bytesDownloaded),
                                       void (^done)(BOOL success, NSString * _Nullable error)) {
+    if (!videoID.length) {
+        // -addObject:nil below would throw on the SABR queue.
+        dispatch_async(dispatch_get_main_queue(), ^{ if (done) done(NO, @"missing video ID"); });
+        return;
+    }
     dispatch_async(SABRQueue(), ^{
         if (!gSABRInFlightVideoIDs) gSABRInFlightVideoIDs = [NSMutableSet set];
         [gSABRInFlightVideoIDs addObject:videoID];

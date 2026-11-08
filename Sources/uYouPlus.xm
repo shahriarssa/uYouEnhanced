@@ -374,31 +374,44 @@ static YTMainAppControlsOverlayView *UYTCurrentControlsOverlay(void) {
 
 %end
 
+// "Disable resume to Shorts" is meant to affect the cold-launch restore only.
+// The old hooks redirected EVERY switch to index 1, so the Shorts tab could
+// never be opened at all while the option was on. Now only the first
+// Shorts selection inside a short launch window is redirected to Home.
+static CFAbsoluteTime gUYTLaunchTime = 0;
+static BOOL gUYTResumeToShortsHandled = NO;
+static const CFTimeInterval kUYTResumeWindow = 8.0;
+
+static BOOL UYTShouldBlockShortsResume(NSUInteger index) {
+    if (!IS_ENABLED(kDisableResumeToShorts) || index != 1) return NO;
+    // Index 1 is only Shorts with the default tab order; hiding Home or Shorts shifts it.
+    if (IS_ENABLED(kHideHomeTab) || IS_ENABLED(@"hideShortsTab")) return NO;
+    if (gUYTResumeToShortsHandled) return NO;
+    if (gUYTLaunchTime > 0 && CFAbsoluteTimeGetCurrent() - gUYTLaunchTime > kUYTResumeWindow) {
+        gUYTResumeToShortsHandled = YES;
+        return NO;
+    }
+    gUYTResumeToShortsHandled = YES;
+    return YES;
+}
+
 %group gDisableResumeToShorts
 %hook YTAppViewControllerImpl
 - (void)setSelectedIndex:(NSUInteger)index {
-    if (IS_ENABLED(kDisableResumeToShorts) && index == 1) {
-        %orig(
-            0
-        );
+    if (UYTShouldBlockShortsResume(index)) {
+        %orig(0);
         return;
     }
-    %orig(
-        index
-    );
+    %orig(index);
 }
 %end
 %hook YTTabBarController
 - (void)setSelectedIndex:(NSUInteger)index {
-    if (IS_ENABLED(kDisableResumeToShorts) && index == 1) {
-        %orig(
-            0
-        );
+    if (UYTShouldBlockShortsResume(index)) {
+        %orig(0);
         return;
     }
-    %orig(
-        index
-    );
+    %orig(index);
 }
 %end
 %end
@@ -660,7 +673,9 @@ static YTMainAppControlsOverlayView *UYTCurrentControlsOverlay(void) {
         return YES;
     }
 
-    return NO;
+    // Was a hard NO, which overrode YouTube's own server flag for everyone
+    // who never touched this option.
+    return %orig;
 }
 
 - (BOOL)speedMasterArm2FastForwardWithoutSeekBySliding {
@@ -765,9 +780,8 @@ static YTMainAppControlsOverlayView *UYTCurrentControlsOverlay(void) {
 }
 %end
 
-%hook YTSettingsSectionItemManager
-- (void)updatePremiumEarlyAccessSectionWithEntry:(id)arg1 {}
-%end
+// (updatePremiumEarlyAccessSectionWithEntry: stub removed: it made the
+// optional gDisableTryNewFeaturesSection toggle impossible to turn off.)
 
 %hook YTSurveyController
 - (void)showSurveyWithRenderer:(id)arg1 surveyParentResponder:(id)arg2 {}
@@ -1557,6 +1571,9 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredShortsArray(NSArray <Y
         }
     }
 }
+// %new: ELMContainerNode has no such method; without %new the hook is never
+// installed and the dispatch_async call above dies with "unrecognized selector".
+%new
 - (void)applyRedColorToSubscribeButton:(id)view {
     if (!view) return;
 
@@ -1572,6 +1589,7 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredShortsArray(NSArray <Y
         }
     }
 }
+%new
 - (void)hideMatchingSubviews:(id)view {
     if (!view) return;
 
@@ -2004,6 +2022,7 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredShortsArray(NSArray <Y
         %init(gShortsQualityPicker);
     }
     if (IS_ENABLED(kDisableResumeToShorts)) {
+        gUYTLaunchTime = CFAbsoluteTimeGetCurrent();
         %init(gDisableResumeToShorts);
     }
 
@@ -2026,15 +2045,21 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredShortsArray(NSArray <Y
     if (![allKeys containsObject:kReplaceYTDownloadWithuYou]) {
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kReplaceYTDownloadWithuYou];
     }
-    if (![allKeys containsObject:kAdBlockWorkaroundLite]) {
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kAdBlockWorkaroundLite];
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kAdBlockWorkaround];
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"removeYouTubeAds"];
-    }
-    if (![allKeys containsObject:kAdBlockWorkaround]) {
+    // Ad-block defaults. The old code ran two independent blocks against a stale
+    // key snapshot, so on first launch the second block silently overwrote the
+    // first, and an upgrading user who only had the Lite key got Lite switched
+    // OFF. Fresh install -> full workaround (what actually shipped); an existing
+    // user only gets the missing key filled in, never their choice flipped.
+    BOOL hasLiteKey = [allKeys containsObject:kAdBlockWorkaroundLite];
+    BOOL hasFullKey = [allKeys containsObject:kAdBlockWorkaround];
+    if (!hasLiteKey && !hasFullKey) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kAdBlockWorkaroundLite];
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kAdBlockWorkaround];
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"removeYouTubeAds"];
+    } else if (!hasLiteKey) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kAdBlockWorkaroundLite];
+    } else if (!hasFullKey) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kAdBlockWorkaround];
     }
     if (![allKeys containsObject:@"noSuggestedVideoAtEnd"]) {
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"noSuggestedVideoAtEnd"];

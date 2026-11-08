@@ -5,22 +5,40 @@
 #define YT_BUNDLE_ID @"com.google.ios.youtube"
 #define YT_NAME @"YouTube"
 
+// Called from a dozen keychain hooks on every keychain access. The old version
+// ran a fresh SecItemCopyMatching each time and never released the returned
+// CFDictionary (leaked on every call). Cache the first non-nil answer and
+// transfer ownership to ARC.
 static NSString *accessGroupID() {
+    static NSString *cached = nil;
+    static dispatch_queue_t lockQueue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lockQueue = dispatch_queue_create("uyt.accessgroup", DISPATCH_QUEUE_SERIAL); });
+    __block NSString *value = nil;
+    dispatch_sync(lockQueue, ^{ value = cached; });
+    if (value) return value;
+
     NSDictionary *query = [NSDictionary dictionaryWithObjectsAndKeys:
                            (__bridge NSString *)kSecClassGenericPassword, (__bridge NSString *)kSecClass,
                            @"bundleSeedID", kSecAttrAccount,
                            @"", kSecAttrService,
                            (id)kCFBooleanTrue, kSecReturnAttributes,
                            nil];
-    CFDictionaryRef result = nil;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
     if (status == errSecItemNotFound) {
-        status = SecItemAdd((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
-        if (status != errSecSuccess) {
-            return nil;
-        }
+        if (result) { CFRelease(result); result = NULL; }
+        status = SecItemAdd((__bridge CFDictionaryRef)query, &result);
     }
-    NSString *accessGroup = [(__bridge NSDictionary *)result objectForKey:(__bridge NSString *)kSecAttrAccessGroup];
+    if (status != errSecSuccess || !result) {
+        if (result) CFRelease(result);
+        return nil;
+    }
+    NSDictionary *attrs = (__bridge_transfer NSDictionary *)result;
+    NSString *accessGroup = [attrs isKindOfClass:[NSDictionary class]] ? attrs[(__bridge NSString *)kSecAttrAccessGroup] : nil;
+    if (accessGroup.length) {
+        dispatch_sync(lockQueue, ^{ cached = [accessGroup copy]; });
+    }
     return accessGroup;
 }
 
@@ -102,6 +120,7 @@ static inline NSString *extractIdWithFormat(GPBUnknownFields *fields, NSInteger 
     if ([fieldArray count] != 1)
         return nil;
     NSString *value = [[NSString alloc] initWithData:[fieldArray firstObject].lengthDelimited encoding:NSUTF8StringEncoding];
+    if (!value.length) return nil; // was formatting "(null)" into the share URL
     return [NSString stringWithFormat:format, value];
 }
 
@@ -111,7 +130,8 @@ static NSString *extractUrlFromFields(GPBUnknownFields *fields) {
     NSArray<GPBUnknownField *> *shareEntityClip = [fields fields:ShareEntityFieldClip];
     if ([shareEntityClip count] == 1) {
         GPBMessage *clipMessage = [%c(GPBMessage) parseFromData:[shareEntityClip firstObject].lengthDelimited error:nil];
-        shareUrl = extractIdWithFormat([[%c(GPBUnknownFields) alloc] initFromMessage:clipMessage], 1, @"https://youtube.com/clip/%@");
+        if (clipMessage) // initFromMessage: raises on nil
+            shareUrl = extractIdWithFormat([[%c(GPBUnknownFields) alloc] initFromMessage:clipMessage], 1, @"https://youtube.com/clip/%@");
     }
 
     if (!shareUrl)
@@ -185,8 +205,10 @@ static BOOL showNativeShareSheet(NSString *serializedShareEntity, UIView *source
     UIViewController *topViewController = [%c(YTUIUtils) topViewControllerForPresenting];
     if (activityViewController.popoverPresentationController) {
         if (sourceView) {
+            // sourceRect is in sourceView's own coordinate space; converting it
+            // to the top VC's view anchored the iPad popover in the wrong place.
             activityViewController.popoverPresentationController.sourceView = sourceView;
-            activityViewController.popoverPresentationController.sourceRect = [sourceView convertRect:sourceView.bounds toView:topViewController.view];
+            activityViewController.popoverPresentationController.sourceRect = sourceView.bounds;
         } else {
             activityViewController.popoverPresentationController.sourceView = topViewController.view;
             CGFloat w = [UIScreen mainScreen].bounds.size.width;
@@ -428,9 +450,12 @@ static BOOL UYTIsJailbroken(void) {
     static BOOL result = NO;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        // Dropped the "LSApplicationWorkspace exists && /Applications exists"
+        // test: both are true on every stock iPhone, so every sideloaded user
+        // was treated as jailbroken and the Dynamic Island fix never armed.
         result = ([[NSFileManager defaultManager] fileExistsAtPath:@"/var/jb"]) ||
                  ([[NSFileManager defaultManager] fileExistsAtPath:@"/.bootstrapped"]) ||
-                 (objc_getClass("LSApplicationWorkspace") != NULL && access("/Applications", F_OK) == 0);
+                 ([[NSFileManager defaultManager] fileExistsAtPath:@"/Library/MobileSubstrate/MobileSubstrate.dylib"]);
     });
     return result;
 }

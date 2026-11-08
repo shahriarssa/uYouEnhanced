@@ -50,12 +50,23 @@ static NSArray<NSString *> *UYTFFCandidateRoots(void) {
     NSString *bundle = UYTMediaBundlePath();
     if (bundle.length) [roots addObject:bundle];
     // Last resort so a build that never staged our frameworks still works.
-    [roots addObject:@"@executable_path/Frameworks"];
+    // This used to be the literal string "@executable_path/Frameworks", which
+    // NSFileManager/dlopen-by-path never expand, so the fallback could not hit.
+    NSString *appFrameworks = [[NSBundle mainBundle] privateFrameworksPath];
+    if (appFrameworks.length) [roots addObject:appFrameworks];
     return roots;
 }
 
+static void UYTFFProbeOnce(void);
+// dispatch_once: the old "if (probed) return; probed = YES;" let a second
+// thread see probed==YES while the first was still dlopen'ing, read backend
+// "None" and drop its ffmpeg command.
 static void UYTFFProbe(void) {
-    if (UYTFFProbed) return;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ UYTFFProbeOnce(); });
+}
+
+static void UYTFFProbeOnce(void) {
     UYTFFProbed = YES;
 
     NSFileManager *fm = [NSFileManager defaultManager];
@@ -108,7 +119,7 @@ NSInteger UYTFFActiveBackend(void) {
     if (UYTFFCachedBackend == UYTFFBackendNone) {
         UYTDebugWarn(@"[uYouPatches] ffmpeg unavailable: %@", UYTFFUnavailableReason());
     } else {
-        BOOL ours = ![UYTFFLoadedRoot isEqualToString:@"@executable_path/Frameworks"];
+        BOOL ours = ![UYTFFLoadedRoot isEqualToString:[[NSBundle mainBundle] privateFrameworksPath]];
         UYTDebugInfo(@"[uYouPatches] ffmpeg backend %ld ready from %@ (%@)",
                      (long)UYTFFCachedBackend, UYTFFLoadedRoot ?: @"?",
                      ours ? @"our bundle" : @"YouTube fallback");
@@ -158,23 +169,34 @@ BOOL UYTFFRun(NSArray<NSString *> *arguments) {
             session = ((id (*)(id, SEL, NSArray *))objc_msgSend)(
                 kitClass, @selector(executeWithArguments:), arguments);
             if (session) {
-                if ([session respondsToSelector:@selector(getReturnCode)]) {
-                    id ret = ((id (*)(id, SEL))objc_msgSend)(session, @selector(getReturnCode));
-                    if ([ret respondsToSelector:@selector(isSuccess)]) {
-                        ok = ((BOOL (*)(id, SEL))objc_msgSend)(ret, @selector(isSuccess));
-                        if ([ret respondsToSelector:@selector(intValue)]) {
-                            rc = (long)[ret intValue];
-                        } else if ([ret respondsToSelector:@selector(getValue)]) {
-                            rc = (long)[(NSNumber *)ret integerValue];
-                        }
+                // FFmpegKitNext's ReturnCode exposes -getValue (int) and
+                // -isValueSuccess; +isSuccess: is a CLASS method. The old code
+                // probed -isSuccess / -intValue, matched neither, and so reported
+                // every successful run as failed (ok stayed NO, rc -1). Its
+                // -getValue branch also messaged -integerValue on a ReturnCode.
+                id ret = [session respondsToSelector:@selector(getReturnCode)]
+                    ? ((id (*)(id, SEL))objc_msgSend)(session, @selector(getReturnCode)) : nil;
+                BOOL haveRC = NO;
+                if (ret) {
+                    if ([ret respondsToSelector:@selector(getValue)]) {
+                        rc = (long)((int (*)(id, SEL))objc_msgSend)(ret, @selector(getValue));
+                        haveRC = YES;
                     } else if ([ret respondsToSelector:@selector(intValue)]) {
                         rc = (long)[ret intValue];
+                        haveRC = YES;
+                    }
+                    if ([ret respondsToSelector:@selector(isValueSuccess)]) {
+                        ok = ((BOOL (*)(id, SEL))objc_msgSend)(ret, @selector(isValueSuccess));
+                    } else if ([[ret class] respondsToSelector:@selector(isSuccess:)]) {
+                        ok = ((BOOL (*)(id, SEL, id))objc_msgSend)([ret class], @selector(isSuccess:), ret);
+                    } else if (haveRC) {
                         ok = (rc == 0);
                     }
                 } else if ([session respondsToSelector:@selector(getState)]) {
-                    NSString *state = [NSString stringWithFormat:@"%@",
-                        ((id (*)(id, SEL))objc_msgSend)(session, @selector(getState))];
-                    ok = [state containsString:@"COMPLETED"];
+                    // SessionState is an NSUInteger enum (Created, Running,
+                    // Failed, Completed); formatting it with %@ would crash.
+                    NSUInteger state = ((NSUInteger (*)(id, SEL))objc_msgSend)(session, @selector(getState));
+                    ok = (state == 3);
                     if (!ok) rc = -2;
                 }
                 if (!ok && [session respondsToSelector:@selector(getOutput)]) {

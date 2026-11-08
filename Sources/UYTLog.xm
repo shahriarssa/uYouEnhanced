@@ -188,12 +188,20 @@ void UYTDebugCaptureLine(NSString *raw) {
     }
 }
 
+static NSUncaughtExceptionHandler *UYTPreviousUncaughtHandler = NULL;
+
 static void UYTHandleUncaught(NSException *exception) {
     @autoreleasepool {
         UYTWriteMessage(@"[UYT-E]", [NSString stringWithFormat:
             @"UNCAUGHT EXCEPTION: %@\nReason: %@\n%@",
             exception.name ?: @"?", exception.reason ?: @"?",
             [exception.callStackSymbols componentsJoinedByString:@"\n"]]);
+        @try { [UYTLogHandle synchronizeFile]; } @catch (NSException *e) {}
+    }
+    // Chain to whatever was installed before us (crash reporters, FLEX, ...);
+    // replacing it outright silently disabled their crash capture.
+    if (UYTPreviousUncaughtHandler && UYTPreviousUncaughtHandler != &UYTHandleUncaught) {
+        UYTPreviousUncaughtHandler(exception);
     }
 }
 
@@ -255,6 +263,7 @@ void UYTLogInstall(void) {
             }
         }
 
+        UYTPreviousUncaughtHandler = NSGetUncaughtExceptionHandler();
         NSSetUncaughtExceptionHandler(&UYTHandleUncaught);
     });
 }
